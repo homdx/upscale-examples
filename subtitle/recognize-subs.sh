@@ -1,6 +1,7 @@
 #!/bin/bash
 
 #time ffmpeg -i mini_it2.mkv  -vf fps=1,crop=1280:200:680:in_h %04d.png
+#whisper: audio to srt: python3 -m whisper --task transcribe --output_format srt
 start=1
 increment=1
 end=3978
