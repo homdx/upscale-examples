@@ -1,5 +1,7 @@
 #!/bin/bash
 
+#Export to png images from video: ffmpeg -i test.mp4 thumb%04d.png
+
 export numfile="6"
 export num="$numfile.txt"
 
