@@ -20,9 +20,10 @@ increment=1
 end=4899
 counter=1
 upscale="/home/user/Project/squashfs-root/resources"
+#Extract AppImage with command line: --appimage-extract
 sourcesfolder="/mnt/srcsfolder"
 resultsfolder="/mnt/resultsfolder"
-mkdir -pv $resulfolder
+mkdir -pv $resultsfolder
 #param1=$1
 #if [ -z "$param1" ]; then
 #    echo "No command-line argument provided."
@@ -31,11 +32,14 @@ mkdir -pv $resulfolder
 #    echo "The value of the first command-line argument is: $param1"
 #    export start=$param
 #fi
+# Number of the zeroes in seq
 for i in $(seq -f "%04g" $start $increment $end); do
 #    echo $i
     f=thumb$i.png
     echo $f
-    runcmd="$upscale/bin/upscayl-realesrgan  -i $sourcesfolder/$f -o $resultsfolder/$f  -s 4 -m $upscale/models -n realesrgan-x4plus  -f png -g 0"
+#    runcmd="$upscale/bin/upscayl-bin  -i $sourcesfolder/$f -o $resultsfolder/$f  -s 4 -m $upscale/models -n realesrgan-x4plus  -f png -g 0"
+#  Now is supporting the 2.15 version
+    runcmd="$upscale/bin/upscayl-bin  -i $sourcesfolder/$f -o $resultsfolder/$f  -s 4 -m $upscale/models -n high-fidelity-4x  -f png -g 0"
     #echo $runcmd >$numfile-tmp.txt
     #runcmd="go run test6.go --num $numfile"
     time $runcmd
