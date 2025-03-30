@@ -22,9 +22,12 @@ increment=1
 end=4899
 counter=1
 upscale="/home/user/Project/squashfs-root/resources"
+# Windows: upscale="/c/upscale20024/resources"
 #Extract AppImage with command line: --appimage-extract
 sourcesfolder="/mnt/srcsfolder"
 resultsfolder="/mnt/resultsfolder"
+# Windows: sourcesfolder="c:\\srcfolder"
+# Windows: resultsfolder="c:\\resultsfolder"
 mkdir -pv $resultsfolder
 #param1=$1
 #if [ -z "$param1" ]; then
@@ -42,6 +45,7 @@ for i in $(seq -f "%04g" $start $increment $end); do
 #    runcmd="$upscale/bin/upscayl-bin  -i $sourcesfolder/$f -o $resultsfolder/$f  -s 4 -m $upscale/models -n realesrgan-x4plus  -f png -g 0"
 #  Now is supporting the 2.15 version
     runcmd="$upscale/bin/upscayl-bin  -i $sourcesfolder/$f -o $resultsfolder/$f  -s 4 -m $upscale/models -n high-fidelity-4x  -f png -g 0"
+    # Windows: runcmd="$upscale/bin/upscayl-bin.exe  -i $sourcesfolder\\$f -o $resultsfolder\\$f  -s 4 -m $upscale\\models -n high-fidelity-4x  -f png -g 0"
     #echo $runcmd >$numfile-tmp.txt
     #runcmd="go run test6.go --num $numfile"
     time $runcmd
