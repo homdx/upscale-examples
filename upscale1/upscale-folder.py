@@ -21,6 +21,8 @@ MODELS_PATH = UPSCALE_ROOT / "models"
 MODEL_MODE = "ultrasharp-4x"
 GPU_ID = "0"
 # =================================================
+# ========================
+
 
 # Global flag for graceful shutdown
 shutdown_flag = False
@@ -212,7 +214,9 @@ def process_video(video_path):
     total_processed = 0
     start_time = time.time()
     process_times = []
-    
+    upscale_start = time.time()
+    h264_start = None
+
     # Process frames
     for i in range(start_frame - 1, total_frames):
         if shutdown_flag:
@@ -245,6 +249,7 @@ def process_video(video_path):
             "-f", "png",
             "-g", GPU_ID
         ]
+#-z 4
         
         frame_start = time.time()
         
@@ -264,8 +269,6 @@ def process_video(video_path):
                 save_progress(progress_file, i + 1)
                 # Continue with next frame instead of breaking
                 continue
-############            
-            # Update statistics
             # Update statistics
             processed_count += 1
             total_processed += 1
@@ -286,35 +289,9 @@ def process_video(video_path):
 
             print(f"[{i+1:04d}/{total_frames:04d}] {current_time_str} (total {total_elapsed_str}) (remain {remain_time_str}) [median {format_time(median_time)}]")
 
-
-#            processed_count += 1
-#            total_processed += 1
-#            process_times.append(frame_time)
-            
-            # Calculate times
-#            avg_time = sum(process_times) / len(process_times) if process_times else 0
-#            remaining_frames = total_frames - (i + 1)
-#            remaining_time = avg_time * remaining_frames
-            
-#            current_time_str = format_time(frame_time)
-#            remain_time_str = format_time(remaining_time)
-#            total_elapsed = time.time() - start_time
-#            total_elapsed_str = format_time(total_elapsed)
-            
-            # Display progress as requested
-#            print(f"[{i+1:04d}/{total_frames:04d}] {current_time_str} (total {total_elapsed_str}) (remain {remain_time_str})")
-            
-
-#############
-
             # Save progress
             save_progress(progress_file, i + 2)
             
-#        except subprocess.TimeoutExpired:
-#            print(f"[{i+1:04d}/{total_frames:04d}] ⏰ Timeout on {frame.name}")
-#            save_progress(progress_file, i + 1)
-#            # Continue with next frame
-#            continue
         except subprocess.TimeoutExpired:
             print(f"[{i+1:04d}/{total_frames:04d}] ⏰ Timeout - retrying with CPU")
             cmd_upscayl_cpu = cmd_upscayl.copy()
@@ -328,7 +305,8 @@ def process_video(video_path):
             continue
     
     print(f"\n✓ Upscaling completed: {total_processed}/{total_frames} frames")
-    
+    upscale_total = time.time() - upscale_start
+
     # Check if we have enough upscaled frames
     upscaled_frames = list(upscaled_dir.glob("thumb*.png"))
     if len(upscaled_frames) == 0:
@@ -403,7 +381,7 @@ def process_video(video_path):
         print(f"⚠️  Could not move source video: {e}")
     
     print(f"\n{'='*60}")
-    print(f"✅ COMPLETE: {final_video}")
+    print(f"✅ COMPLETE: {final_video.absolute()}")  # Full path
     print(f"    Size: {final_video.stat().st_size // (1024*1024)} MB")
     print(f"{'='*60}")
     
@@ -471,6 +449,9 @@ def main():
                     if success:
                         processed_videos.add(video_id)
                         print(f"✓ Finished processing: {video.name}")
+                        print(f"⏱️  TIMING: Upscayl: {format_time(upscale_total)} | H.264: {format_time(h264_total)} | Total: {format_time(time.time() - start_time)}")  // NEW
+                        print(f"    Full path: {final_video.absolute()}")  // NEW
+
                     else:
                         print(f"⚠️  Processing incomplete: {video.name}")
                 except Exception as e:
