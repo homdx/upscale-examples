@@ -21,8 +21,6 @@ MODELS_PATH = UPSCALE_ROOT / "models"
 MODEL_MODE = "ultrasharp-4x"
 GPU_ID = "0"
 # =================================================
-# ========================
-
 
 # Global flag for graceful shutdown
 shutdown_flag = False
@@ -236,10 +234,10 @@ def process_video(video_path):
             save_progress(progress_file, i + 2)
             continue
 
-        # ✅ FIXED: Save BEFORE upscaling → Ctrl+C retries CURRENT frame
+        # Save BEFORE upscaling
         save_progress(progress_file, i + 1)
 
-        # Build Upscayl command (matching your bash script)
+        # Build Upscayl command
         cmd_upscayl = [
             str(UPSCALE_BIN),
             "-i", str(frame),
@@ -247,65 +245,89 @@ def process_video(video_path):
             "-m", str(MODELS_PATH),
             "-n", MODEL_MODE,
             "-f", "png",
+            "-s", SCALE_FACTOR,
+            "-c", "100",
             "-g", GPU_ID
         ]
-#-z 4
         
         frame_start = time.time()
         
+        # ================= FIX START =================
         try:
-            # Run Upscayl
+            # 1. Try GPU Run
             result = subprocess.run(
                 cmd_upscayl,
                 capture_output=True,
                 text=True,
-                timeout=300  # 5 minutes per frame
+                timeout=300
             )
             
-            frame_time = time.time() - frame_start
-            
+            # 2. Check for GPU Failure (Exit Code != 0)
             if result.returncode != 0:
-                print(f"[{i+1:04d}/{total_frames:04d}] ❌ Failed: {result.stderr[:100]}")
-                save_progress(progress_file, i + 1)
-                # Continue with next frame instead of breaking
-                continue
-            # Update statistics
-            processed_count += 1
-            total_processed += 1
-            process_times.append(frame_time)  # Keep history
+                print(f"[{i+1:04d}/{total_frames:04d}] ⚠️ GPU Failed ({result.stderr[:40]}...) -> Retrying with CPU...")
+                
+                # Create CPU command
+                cmd_upscayl_cpu = cmd_upscayl.copy()
+                cmd_upscayl_cpu[-1] = "-1"  # Set ID to -1 (CPU)
+                
+                # Run CPU
+                result = subprocess.run(
+                    cmd_upscayl_cpu, 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=600  # Longer timeout for CPU
+                )
 
-            # ✅ IMPROVED: Use MEDIAN of last 10 frames (or all if <10)
-            recent_times = process_times[-10:]  # Last 10 frames
-            recent_times.sort()
-            median_time = recent_times[len(recent_times)//2]  # Median
-
-            remaining_frames = total_frames - (i + 1)
-            remaining_time = median_time * remaining_frames
-
-            current_time_str = format_time(frame_time)
-            remain_time_str = format_time(remaining_time)
-            total_elapsed = time.time() - start_time
-            total_elapsed_str = format_time(total_elapsed)
-
-            print(f"[{i+1:04d}/{total_frames:04d}] {current_time_str} (total {total_elapsed_str}) (remain {remain_time_str}) [median {format_time(median_time)}]")
-
-            # Save progress
-            save_progress(progress_file, i + 2)
-            
         except subprocess.TimeoutExpired:
-            print(f"[{i+1:04d}/{total_frames:04d}] ⏰ Timeout - retrying with CPU")
+            print(f"[{i+1:04d}/{total_frames:04d}] ⏰ Timeout -> Retrying with CPU...")
+            
+            # Create CPU command
             cmd_upscayl_cpu = cmd_upscayl.copy()
-            cmd_upscayl_cpu[-1] = "-1"  # CPU fallback
-            result = subprocess.run(cmd_upscayl_cpu, timeout=600)  # Longer timeout
-            continue
-
-        except Exception as e:
-            print(f"[{i+1:04d}/{total_frames:04d}] ⚠️ Error: {str(e)[:100]}")
+            cmd_upscayl_cpu[-1] = "-1"
+            
+            try:
+                result = subprocess.run(
+                    cmd_upscayl_cpu, 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=600
+                )
+            except subprocess.TimeoutExpired:
+                 print(f"[{i+1:04d}/{total_frames:04d}] ❌ CPU also Timed Out")
+                 continue
+        
+        # 3. Final Check (did CPU or GPU succeed?)
+        if result.returncode != 0:
+            print(f"[{i+1:04d}/{total_frames:04d}] ❌ Failed: {result.stderr[:100]}")
             save_progress(progress_file, i + 1)
             continue
+        
+        frame_time = time.time() - frame_start
+        
+        # Update statistics
+        processed_count += 1
+        total_processed += 1
+        process_times.append(frame_time)  # Keep history
+
+        # Use MEDIAN of last 10 frames
+        recent_times = process_times[-10:]  # Last 10 frames
+        recent_times.sort()
+        median_time = recent_times[len(recent_times)//2]  # Median
+
+        remaining_frames = total_frames - (i + 1)
+        remaining_time = median_time * remaining_frames
+
+        current_time_str = format_time(frame_time)
+        remain_time_str = format_time(remaining_time)
+        total_elapsed = time.time() - start_time
+        total_elapsed_str = format_time(total_elapsed)
+
+        print(f"[{i+1:04d}/{total_frames:04d}] {current_time_str} (total {total_elapsed_str}) (remain {remain_time_str}) [median {format_time(median_time)}]")
+
+        # Save progress
+        save_progress(progress_file, i + 2)
     
     print(f"\n✓ Upscaling completed: {total_processed}/{total_frames} frames")
-    upscale_total = time.time() - upscale_start
 
     # Check if we have enough upscaled frames
     upscaled_frames = list(upscaled_dir.glob("thumb*.png"))
@@ -364,6 +386,11 @@ def process_video(video_path):
         
         # Cleanup
         temp_video.unlink(missing_ok=True)
+        # Save options to file
+        options_path = project_dir / f"{video_name}-options.txt"
+        with open(options_path, "w") as f:
+            f.write(f"Model: {MODEL_MODE}\n")
+            f.write(f"Scale: {SCALE_FACTOR}\n")
         
     except subprocess.CalledProcessError as e:
         print(f"❌ Failed to create video: {e}")
@@ -386,6 +413,7 @@ def process_video(video_path):
     print(f"{'='*60}")
     
     return True
+
 
 def main():
     """Main function with continuous monitoring"""
@@ -445,15 +473,16 @@ def main():
                     print(f"🆕 NEW: {video.name}")
                 
                 try:
+                    # process_video prints all the details itself
                     success = process_video(video)
+                    
                     if success:
                         processed_videos.add(video_id)
                         print(f"✓ Finished processing: {video.name}")
-                        print(f"⏱️  TIMING: Upscayl: {format_time(upscale_total)} | H.264: {format_time(h264_total)} | Total: {format_time(time.time() - start_time)}")  // NEW
-                        print(f"    Full path: {final_video.absolute()}")  // NEW
-
+                        print(f"✓ Using model: {MODEL_MODE }")
                     else:
                         print(f"⚠️  Processing incomplete: {video.name}")
+                        
                 except Exception as e:
                     print(f"❌ Error processing {video.name}: {e}")
                 
