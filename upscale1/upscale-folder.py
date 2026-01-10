@@ -18,6 +18,7 @@ OUTPUT_BASE_DIR = Path("./results")
 UPSCALE_ROOT = Path("/home/homdx/Progs/squashfs-root/resources")
 UPSCALE_BIN = UPSCALE_ROOT / "bin" / "upscayl-bin"
 MODELS_PATH = UPSCALE_ROOT / "models"
+SCALE_FACTOR = "4"
 MODEL_MODE = "ultrasharp-4x"
 GPU_ID = "0"
 # =================================================
@@ -88,24 +89,24 @@ def check_tools():
     """Check if required tools are available"""
     required_tools = ["ffmpeg", "ffprobe"]
     missing_tools = []
-    
+
     for tool in required_tools:
         try:
             subprocess.run([tool, "-version"], stdout=subprocess.DEVNULL, 
                          stderr=subprocess.DEVNULL, check=True)
         except (subprocess.CalledProcessError, FileNotFoundError):
             missing_tools.append(tool)
-    
+
     if missing_tools:
         print(f"❌ Missing required tools: {', '.join(missing_tools)}")
         print("Please install them and ensure they're in PATH")
         return False
-    
+
     if not UPSCALE_BIN.exists():
         print(f"❌ Upscayl not found: {UPSCALE_BIN}")
         print("Please check the UPSCALE_ROOT path")
         return False
-    
+
     return True
 
 def get_total_frames(video_path):
@@ -123,17 +124,17 @@ def get_total_frames(video_path):
 
 def process_video(video_path):
     global shutdown_flag
-    
+
     video_name = video_path.stem
     project_dir = OUTPUT_BASE_DIR / video_name
     frames_dir = project_dir / "frames"
     upscaled_dir = project_dir / "upscaled"
     progress_file = project_dir / "progress.txt"
-    
+
     # Create directories
     frames_dir.mkdir(parents=True, exist_ok=True)
     upscaled_dir.mkdir(parents=True, exist_ok=True)
-    
+
     print(f"\n{'='*60}")
     print(f"Processing: {video_name}")
     print(f"Source: {video_path}")
@@ -147,7 +148,7 @@ def process_video(video_path):
     # 1. Extract Frames
     print(f"\nStep 1: Extracting frames...")
     frame_pattern = frames_dir / "thumb%04d.png"
-    
+
     existing_frames = len(list(frames_dir.glob("thumb*.png")))
     if existing_frames == 0:
         cmd_extract = [
@@ -168,7 +169,7 @@ def process_video(video_path):
     # 2. Extract Audio
     print(f"\nStep 2: Extracting audio...")
     audio_path = project_dir / "audio.aac"
-    
+
     if not audio_path.exists():
         cmd_audio = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -185,28 +186,23 @@ def process_video(video_path):
 
     # 3. Upscayl Processing
     print(f"\nStep 3: Upscayl processing ({MODEL_MODE})...")
-    
+
     # Get all frames and sort numerically
     frames = sorted(
         frames_dir.glob("thumb*.png"),
         key=lambda x: extract_frame_number(x.name)
     )
-    
     if not frames:
         print("❌ No frames found in frames directory!")
         return False
-    
     total_frames = len(frames)
     print(f"Found {total_frames} frames to process")
-    
     # Load progress
     start_frame = load_progress(progress_file)
     if start_frame > total_frames:
         start_frame = total_frames
-    
     print(f"Starting from frame {start_frame:04d} of {total_frames:04d}")
     print("-" * 50)
-    
     # Statistics
     processed_count = 0
     total_processed = 0
@@ -221,13 +217,11 @@ def process_video(video_path):
             print("\n⚠️  Shutdown detected, saving progress...")
             save_progress(progress_file, i + 1)
             return False
-        
         frame = frames[i]
         frame_num = extract_frame_number(frame.name)
         output_frame = upscaled_dir / frame.name
-        
         # Skip if already processed
-        if output_frame.exists():
+        if output_frame.exists() and (i + 1) != start_frame:
             print(f"[{i+1:04d}/{total_frames:04d}] Skipping: {frame.name}")
             total_processed += 1
             # Update progress
@@ -235,7 +229,7 @@ def process_video(video_path):
             continue
 
         # Save BEFORE upscaling
-        save_progress(progress_file, i + 1)
+        # Fix: Do not save before processing. If we crash here, we want to resume at 'i + 1'
 
         # Build Upscayl command
         cmd_upscayl = [
@@ -249,9 +243,8 @@ def process_video(video_path):
             "-c", "100",
             "-g", GPU_ID
         ]
-        
+
         frame_start = time.time()
-        
         # ================= FIX START =================
         try:
             # 1. Try GPU Run
@@ -261,15 +254,15 @@ def process_video(video_path):
                 text=True,
                 timeout=300
             )
-            
+
             # 2. Check for GPU Failure (Exit Code != 0)
             if result.returncode != 0:
                 print(f"[{i+1:04d}/{total_frames:04d}] ⚠️ GPU Failed ({result.stderr[:40]}...) -> Retrying with CPU...")
-                
+
                 # Create CPU command
                 cmd_upscayl_cpu = cmd_upscayl.copy()
                 cmd_upscayl_cpu[-1] = "-1"  # Set ID to -1 (CPU)
-                
+
                 # Run CPU
                 result = subprocess.run(
                     cmd_upscayl_cpu, 
@@ -280,11 +273,11 @@ def process_video(video_path):
 
         except subprocess.TimeoutExpired:
             print(f"[{i+1:04d}/{total_frames:04d}] ⏰ Timeout -> Retrying with CPU...")
-            
+
             # Create CPU command
             cmd_upscayl_cpu = cmd_upscayl.copy()
             cmd_upscayl_cpu[-1] = "-1"
-            
+
             try:
                 result = subprocess.run(
                     cmd_upscayl_cpu, 
@@ -295,15 +288,16 @@ def process_video(video_path):
             except subprocess.TimeoutExpired:
                  print(f"[{i+1:04d}/{total_frames:04d}] ❌ CPU also Timed Out")
                  continue
-        
+
         # 3. Final Check (did CPU or GPU succeed?)
         if result.returncode != 0:
             print(f"[{i+1:04d}/{total_frames:04d}] ❌ Failed: {result.stderr[:100]}")
             save_progress(progress_file, i + 1)
             continue
-        
+        # ================= FIX END =================
+
         frame_time = time.time() - frame_start
-        
+
         # Update statistics
         processed_count += 1
         total_processed += 1
@@ -326,25 +320,26 @@ def process_video(video_path):
 
         # Save progress
         save_progress(progress_file, i + 2)
-    
+
     print(f"\n✓ Upscaling completed: {total_processed}/{total_frames} frames")
+    # upscale_total = time.time() - upscale_start  <-- REMOVED TO FIX NAME ERROR
 
     # Check if we have enough upscaled frames
     upscaled_frames = list(upscaled_dir.glob("thumb*.png"))
     if len(upscaled_frames) == 0:
         print("❌ No upscaled frames found!")
         return False
-    
+
     # 4. Create Final Video
     print(f"\nStep 4: Creating final video...")
-    
+
     # Use original framerate
     print(f"✓ Using framerate: {framerate} fps")
-    
+
     # Temporary lossless video
     temp_video = project_dir / "temp_lossless.mkv"
-    final_video = project_dir / f"{video_name}_upscaled.mp4"
-    
+    final_video = project_dir / f"{video_name}_upscaled_{MODEL_MODE}.mp4"
+
     try:
         # Step 1: Create video from upscaled frames
         cmd_video = [
@@ -357,10 +352,10 @@ def process_video(video_path):
             "-pix_fmt", "yuv420p",
             str(temp_video)
         ]
-        
+
         print("Creating video from frames...")
         subprocess.run(cmd_video, check=True)
-        
+
         # Step 2: Add audio if available
         if audio_path.exists():
             cmd_final = [
@@ -381,9 +376,8 @@ def process_video(video_path):
                 str(final_video)
             ]
             print("Creating final video without audio...")
-        
         subprocess.run(cmd_final, check=True)
-        
+
         # Cleanup
         temp_video.unlink(missing_ok=True)
         # Save options to file
@@ -391,40 +385,32 @@ def process_video(video_path):
         with open(options_path, "w") as f:
             f.write(f"Model: {MODEL_MODE}\n")
             f.write(f"Scale: {SCALE_FACTOR}\n")
-        
     except subprocess.CalledProcessError as e:
         print(f"❌ Failed to create video: {e}")
         return False
-    
     # Move source video to processed folder
     PROCESSED_DIR = OUTPUT_BASE_DIR / "processed_videos"
     PROCESSED_DIR.mkdir(exist_ok=True)
-    
     try:
         source_processed = PROCESSED_DIR / video_path.name
         shutil.move(str(video_path), str(source_processed))
         print(f"✓ Moved source video to: {source_processed}")
     except Exception as e:
         print(f"⚠️  Could not move source video: {e}")
-    
     print(f"\n{'='*60}")
     print(f"✅ COMPLETE: {final_video.absolute()}")  # Full path
     print(f"    Size: {final_video.stat().st_size // (1024*1024)} MB")
     print(f"{'='*60}")
-    
     return True
 
 
 def main():
     """Main function with continuous monitoring"""
-    
     # Setup signal handler
     signal.signal(signal.SIGINT, signal_handler)
-    
     # Create directories
     INPUT_DIR.mkdir(exist_ok=True)
     OUTPUT_BASE_DIR.mkdir(exist_ok=True)
-    
     print(f"{'='*60}")
     print(f"Video Upscaling Processor")
     print(f"{'='*60}")
@@ -433,68 +419,54 @@ def main():
     print(f"Upscayl path: {UPSCALE_BIN}")
     print(f"Model: {MODEL_MODE}")
     print(f"{'='*60}\n")
-    
     # Check required tools
     if not check_tools():
         sys.exit(1)
-    
     print("Monitoring for MP4 files... (Ctrl+C to stop)")
     print("Place MP4 files in:", INPUT_DIR.absolute())
     print("-" * 60)
-    
     processed_videos = set()
-    
     try:
         while not shutdown_flag:
             # Get all MP4 files
             mp4_files = list(INPUT_DIR.glob("*.mp4"))
-            
             for video in mp4_files:
                 if shutdown_flag:
                     break
-                    
                 # Check if already processed
                 video_id = video.stem
                 if video_id in processed_videos:
                     continue
-                
                 # Check if final output exists
-                final_output = OUTPUT_BASE_DIR / video_id / f"{video_id}_upscaled.mp4"
+                final_output = OUTPUT_BASE_DIR / video_id / f"{video_id}_upscaled_{MODEL_MODE}.mp4"
                 if final_output.exists():
                     print(f"✅ Skipping (already processed): {video.name}")
                     processed_videos.add(video_id)
                     continue
-                
                 # Check if processing was started but not finished
                 project_dir = OUTPUT_BASE_DIR / video_id
                 if project_dir.exists():
                     print(f"🔄 RESUMING: {video.name}")
                 else:
                     print(f"🆕 NEW: {video.name}")
-                
                 try:
                     # process_video prints all the details itself
                     success = process_video(video)
-                    
                     if success:
                         processed_videos.add(video_id)
                         print(f"✓ Finished processing: {video.name}")
                         print(f"✓ Using model: {MODEL_MODE }")
                     else:
                         print(f"⚠️  Processing incomplete: {video.name}")
-                        
                 except Exception as e:
                     print(f"❌ Error processing {video.name}: {e}")
-                
                 if shutdown_flag:
                     break
-            
             # Sleep if no new videos
             if not mp4_files:
                 time.sleep(10)
             else:
                 time.sleep(5)
-                
     except KeyboardInterrupt:
         print("\n\n⚠️  Process interrupted by user")
     except Exception as e:
