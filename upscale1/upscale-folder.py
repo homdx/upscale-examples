@@ -12,6 +12,13 @@ import signal
 import concurrent.futures  # [NEW] For parallel processing
 # ... existing imports ...
 
+# [NEW] Import the watermark cleaner function
+try:
+    from sora_cleaner import process_water_file
+except ImportError:
+    print("❌ ERROR: sora_cleaner.py not found. Please create it next to this script.")
+    sys.exit(1)
+
 # ================= CONFIGURATION =================
 # ... existing config ...
 # [NEW] Number of threads for indicator processing (default: all cores)
@@ -38,10 +45,7 @@ SORA_CLI_DIR = Path("/home/homdx/Project/opensource/github/SoraWatermarkCleaner"
 SORA_CLI = "cli.py"
 
 # ✅ YOUR REAL PATHS
-UPSCALE_ROOT = Path("/home/homdx/Progs/squashfs-root/resources")
 UPSCALE_BIN = UPSCALE_ROOT / "bin" / "upscayl-bin"
-# Windows UPSCALE_ROOT = Path("C:/upscale20024/resources")
-# Windows UPSCALE_BIN = UPSCALE_ROOT / "bin" / "upscayl-bin.exe"
 MODELS_PATH = UPSCALE_ROOT / "models"
 #MODEL_MODE = "ultrasharp-4x"
 #MODEL_MODE = "high-fidelity-4x"
@@ -51,9 +55,8 @@ MODELS_PATH = UPSCALE_ROOT / "models"
 MODEL_MODE = "4x_NMKD-Siax_200k"
 SCALE_FACTOR = "4"
 
-
 GPU_ID = "0"
-num_of_video = 3
+num_of_video = 1
 num_of_video_total = 4
 # ========================
 
@@ -165,339 +168,6 @@ def get_total_frames(video_path):
         return 0
 
 
-def process_water_file(video_path):
-    """Run SoraWatermarkCleaner on a video found in WATER_DIR and copy result to INPUT_DIR.
-
-    Behavior adjustments per user request:
-      - Ensure the cleaned file produced by Sora is *saved* in results-water (root).
-      - After successful cleaning, move the original source file from water_remove -> results-water/processed_videos
-        (so it's no longer in water_remove and won't be reprocessed).
-      - If a cleaned file already exists in results-water (root) or results-water/processed_videos, skip running Sora.
-
-    Note: Sora expects an input *directory*, so we create a temporary directory and copy the single file there.
-    """
-    import tempfile
-
-    print(f"{'='*60}")
-    print(f"Watermark removal: {video_path.name}")
-    print(f"Using Sora dir: {SORA_CLI_DIR}")
-
-    # Resolve absolute paths
-    video_abs = Path(video_path).resolve()
-    results_abs = RESULTS_WATER_DIR.resolve()
-    results_abs.mkdir(parents=True, exist_ok=True)
-    processed_dir = results_abs / "processed_videos"
-    processed_dir.mkdir(parents=True, exist_ok=True)
-    INPUT_DIR.resolve().mkdir(parents=True, exist_ok=True)
-
-    cleaned_basename = f"cleaned_{video_abs.name}"
-    cleaned_in_root = results_abs / cleaned_basename
-    cleaned_in_processed = processed_dir / cleaned_basename
-
-    # If cleaned already exists in root or processed -> ensure copied to input and move source, skip
-    if cleaned_in_root.exists() or cleaned_in_processed.exists():
-        found = cleaned_in_root if cleaned_in_root.exists() else cleaned_in_processed
-        print(f"✓ Found already-cleaned file: {found}")
-        dest = INPUT_DIR.resolve() / found.name
-        if not dest.exists():
-            try:
-                shutil.copy2(str(found), str(dest))
-                print(f"✓ Copied cleaned file to input_videos/: {dest}")
-            except Exception as e:
-                print(f"⚠️ Failed to copy cleaned file to input_videos/: {e}")
-        else:
-            print(f"✓ Cleaned file already present in input_videos/: {dest}")
-        # Move the source file out of water_remove into processed_videos to avoid re-trigger
-        try:
-            moved_source = processed_dir / video_abs.name
-            if video_abs.exists():
-                shutil.move(str(video_abs), str(moved_source))
-                print(f"✓ Moved original source to processed_videos/: {moved_source}")
-        except Exception as e:
-            print(f"⚠️ Failed to move source to processed_videos: {e}")
-        return True
-
-    # Otherwise we need to run the cleaner
-    temp_input_dir = Path(tempfile.mkdtemp(prefix=f"sora_input_{video_abs.stem}_"))
-    try:
-        tmp_dest = temp_input_dir / video_abs.name
-        shutil.copy2(str(video_abs), str(tmp_dest))
-        print(f"Copied source to temp input dir: {tmp_dest}")
-
-        # Locate python inside venv if possible (try python3 then python)
-        venv_python = SORA_VENV_ACTIVATE.parent / "python3"
-        if not venv_python.exists():
-            alt = SORA_VENV_ACTIVATE.parent / "python"
-            venv_python = alt if alt.exists() else None
-
-        if venv_python:
-            python_cmd = str(venv_python)
-            cmd = [python_cmd, SORA_CLI, "-i", str(temp_input_dir), "-o", str(results_abs)]
-            use_shell = False
-        else:
-            # fallback: source the venv activate script then run python3
-            shell_cmd = f"source {str(SORA_VENV_ACTIVATE)} && python3 {SORA_CLI} -i '{str(temp_input_dir)}' -o '{str(results_abs)}'"
-            cmd = ["/bin/bash", "-lc", shell_cmd]
-            use_shell = True
-
-        print("Running watermark cleaner (this may take a while)...")
-
-        # Stream output live to console and also collect for logs
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(SORA_CLI_DIR),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            shell=False
-        )
-        collected = []
-        try:
-            for line in iter(proc.stdout.readline, ''):
-                if line == '' and proc.poll() is not None:
-                    break
-                print(line, end='')
-                collected.append(line)
-        except Exception as e:
-            print(f"⚠️ Error while streaming Sora output: {e}")
-        finally:
-            proc.stdout.close()
-            ret = proc.wait()
-
-        full_output = ''.join(collected)
-
-        if ret != 0:
-            print(f"❌ Watermark cleaner returned non-zero exit status {ret}")
-            # write log for debugging
-            try:
-                log_path = results_abs / f"{video_abs.stem}.sora.log"
-                with open(log_path, 'w') as lf:
-                    lf.write(full_output)
-                print(f"✓ Wrote Sora log: {log_path}")
-            except Exception:
-                pass
-            return False
-
-        # find produced .mp4 files in results_abs
-        produced_files = list(results_abs.glob("*.mp4"))
-        if not produced_files:
-            print("⚠️  No .mp4 files found in results-water after run")
-            return False
-
-        # Prefer standardized cleaned name, otherwise newest
-        candidate_by_name = [p for p in produced_files if p.name == cleaned_basename]
-        if candidate_by_name:
-            chosen = candidate_by_name[0]
-        else:
-            # fallback: use newest file
-            chosen = sorted(produced_files, key=lambda p: p.stat().st_mtime, reverse=True)[0]
-
-        # Ensure the cleaned file remains in results-water root (do NOT move it)
-        cleaned_target = results_abs / chosen.name
-        if not cleaned_target.exists():
-            # If chosen is not in results root (unlikely), copy it there
-            try:
-                shutil.copy2(str(chosen), str(cleaned_target))
-                print(f"✓ Copied cleaned file into results-water/: {cleaned_target}")
-            except Exception as e:
-                print(f"⚠️ Failed to copy cleaned file into results-water/: {e}")
-        else:
-            print(f"✓ Cleaned file present in results-water/: {cleaned_target}")
-
-        # Copy to input_videos if not exists
-        dest = INPUT_DIR.resolve() / chosen.name
-        if not dest.exists():
-            try:
-                shutil.copy2(str(chosen), str(dest))
-                print(f"✓ Copied cleaned file to input_videos/: {dest}")
-            except Exception as e:
-                print(f"❌ Failed to copy cleaned file to input_videos: {e}")
-                return False
-        else:
-            print(f"✓ Cleaned file already exists in input_videos/: {dest}")
-
-        # Move the original source file from water_remove to processed_videos
-        try:
-            moved_source = processed_dir / video_abs.name
-            if video_abs.exists():
-                shutil.move(str(video_abs), str(moved_source))
-                print(f"✓ Moved original source to processed_videos/: {moved_source}")
-        except Exception as e:
-            print(f"⚠️ Failed to move source to processed_videos: {e}")
-
-        # Write the Sora log into processed_videos for reference
-        try:
-            log_path = processed_dir / f"{video_abs.stem}.sora.log"
-            with open(log_path, 'w') as lf:
-                lf.write(full_output)
-        except Exception:
-            pass
-
-        return True
-
-    except subprocess.TimeoutExpired:
-        print("❌ Watermark cleaner timed out")
-        return False
-
-    except Exception as e:
-        print(f"❌ Exception during watermark step: {e}")
-        return False
-
-    finally:
-        # cleanup temp input dir (comment out if you want to keep it for debugging)
-        try:
-            if temp_input_dir.exists():
-                shutil.rmtree(str(temp_input_dir))
-                print(f"Removed temp input dir: {temp_input_dir}")
-        except Exception as e:
-            print(f"⚠️ Failed to remove temp input dir {temp_input_dir}: {e}")
-
-
-    # If cleaned file exists in results-water root (not yet moved), move it to processed and copy
-    if cleaned_in_root.exists():
-        print(f"✓ Found cleaned file in results-water: {cleaned_in_root}")
-        try:
-            dest_input = INPUT_DIR.resolve() / cleaned_in_root.name
-            if not dest_input.exists():
-                shutil.copy2(str(cleaned_in_root), str(dest_input))
-                print(f"✓ Copied cleaned file to input_videos/: {dest_input}")
-            # Move to processed_videos to avoid being picked up again
-            moved = processed_dir / cleaned_in_root.name
-            shutil.move(str(cleaned_in_root), str(moved))
-            print(f"✓ Moved cleaned file to processed_videos/: {moved}")
-        except Exception as e:
-            print(f"⚠️ Failed to copy/move existing cleaned file: {e}")
-        return True
-
-    # Otherwise we need to run the cleaner
-    temp_input_dir = Path(tempfile.mkdtemp(prefix=f"sora_input_{video_abs.stem}_"))
-    try:
-        tmp_dest = temp_input_dir / video_abs.name
-        shutil.copy2(str(video_abs), str(tmp_dest))
-        print(f"Copied source to temp input dir: {tmp_dest}")
-
-        # Locate python inside venv if possible (try python3 then python)
-        venv_python = SORA_VENV_ACTIVATE.parent / "python3"
-        if not venv_python.exists():
-            alt = SORA_VENV_ACTIVATE.parent / "python"
-            venv_python = alt if alt.exists() else None
-
-        if venv_python:
-            python_cmd = str(venv_python)
-            cmd = [python_cmd, SORA_CLI, "-i", str(temp_input_dir), "-o", str(results_abs)]
-            use_shell = False
-        else:
-            # fallback: source the venv activate script then run python3
-            shell_cmd = f"source {str(SORA_VENV_ACTIVATE)} && python3 {SORA_CLI} -i '{str(temp_input_dir)}' -o '{str(results_abs)}'"
-            cmd = ["/bin/bash", "-lc", shell_cmd]
-            use_shell = True
-
-        print("Running watermark cleaner (this may take a while)...")
-
-        # Stream output live to console and also collect for logs
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(SORA_CLI_DIR),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            shell=False
-        )
-        collected = []
-        try:
-            for line in iter(proc.stdout.readline, ''):
-                if line == '' and proc.poll() is not None:
-                    break
-                print(line, end='')
-                collected.append(line)
-        except Exception as e:
-            print(f"⚠️ Error while streaming Sora output: {e}")
-        finally:
-            proc.stdout.close()
-            ret = proc.wait()
-
-        full_output = ''.join(collected)
-
-        if ret != 0:
-            print(f"❌ Watermark cleaner returned non-zero exit status {ret}")
-            # write log for debugging
-            try:
-                log_path = results_abs / f"{video_abs.stem}.sora.log"
-                with open(log_path, 'w') as lf:
-                    lf.write(full_output)
-                print(f"✓ Wrote Sora log: {log_path}")
-            except Exception:
-                pass
-            return False
-
-        # find produced .mp4 files in results_abs
-        produced_files = list(results_abs.glob("*.mp4"))
-        if not produced_files:
-            print("⚠️  No .mp4 files found in results-water after run")
-            return False
-
-        # Prefer standardized cleaned name, otherwise newest
-        candidate_by_name = [p for p in produced_files if p.name == cleaned_basename]
-        if candidate_by_name:
-            chosen = candidate_by_name[0]
-        else:
-            # fallback: use newest file
-            chosen = sorted(produced_files, key=lambda p: p.stat().st_mtime, reverse=True)[0]
-
-        # Copy to input_videos if not exists
-        dest = INPUT_DIR.resolve() / chosen.name
-        if not dest.exists():
-            try:
-                shutil.copy2(str(chosen), str(dest))
-                print(f"✓ Copied cleaned file to input_videos/: {dest}")
-            except Exception as e:
-                print(f"❌ Failed to copy cleaned file to input_videos: {e}")
-                return False
-        else:
-            print(f"✓ Cleaned file already exists in input_videos/: {dest}")
-
-        # Move the chosen file into processed_videos to avoid re-processing
-        moved_target = processed_dir / chosen.name
-        try:
-            shutil.move(str(chosen), str(moved_target))
-            print(f"✓ Moved cleaned file to processed_videos/: {moved_target}")
-        except Exception as e:
-            print(f"⚠️ Failed to move cleaned file to processed_videos: {e}")
-            # attempt to remove original in results root to avoid loop
-            try:
-                chosen.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-        # Optionally write the Sora log next to the moved file
-        try:
-            log_path = processed_dir / f"{video_abs.stem}.sora.log"
-            with open(log_path, 'w') as lf:
-                lf.write(full_output)
-        except Exception:
-            pass
-
-        return True
-
-    except subprocess.TimeoutExpired:
-        print("❌ Watermark cleaner timed out")
-        return False
-
-    except Exception as e:
-        print(f"❌ Exception during watermark step: {e}")
-        return False
-
-    finally:
-        # cleanup temp input dir (comment out if you want to keep it for debugging)
-        try:
-            if temp_input_dir.exists():
-                shutil.rmtree(str(temp_input_dir))
-                print(f"Removed temp input dir: {temp_input_dir}")
-        except Exception as e:
-            print(f"⚠️ Failed to remove temp input dir {temp_input_dir}: {e}")
-
 def process_indicator_task(args):
     """Worker function for parallel indicator processing"""
     path, frame_idx, total, v_num, v_tot = args
@@ -595,9 +265,7 @@ def process_video(video_path):
     def flush_batch():
         """Helper to process queued frames in parallel with live updates"""
         nonlocal processed_count, total_processed
-
-        # Check shutdown immediately
-        if shutdown_flag or not batch_queue:
+        if not batch_queue:
             return
 
         print(f" Processing batch of {len(batch_queue)} existing frames...")
@@ -605,24 +273,16 @@ def process_video(video_path):
         # Map futures to their frame index for correct ordering in logs
         future_to_index = {}
 
-        # [FIX] Use 'with' block, but monitor shutdown_flag inside the loop
-        executor = concurrent.futures.ProcessPoolExecutor(max_workers=INDICATOR_THREADS)
-        try:
-            # Submit all tasks first
+        with concurrent.futures.ProcessPoolExecutor(max_workers=INDICATOR_THREADS) as executor:
             for item in batch_queue:
                 f_obj, idx_0 = item
                 out_f = upscaled_dir / f_obj.name
+                # Submit task
                 fut = executor.submit(process_indicator_task, (out_f, idx_0 + 1, total_frames, num_of_video, num_of_video_total))
                 future_to_index[fut] = idx_0
 
-            # Process as they complete
+            # Process as they complete (Live Updates)
             for future in concurrent.futures.as_completed(future_to_index):
-                # [FIX] CRITICAL: Break loop immediately if shutdown requested
-                if shutdown_flag:
-                    print(" Aborting batch processing...")
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    return
-
                 idx_0 = future_to_index[future]
                 try:
                     success, duration = future.result()
@@ -635,26 +295,30 @@ def process_video(video_path):
                     processed_count += 1
                     total_processed += 1
 
-                # Update Stats
+                # --- STATS CALCULATION ---
                 total_elapsed = time.time() - start_time
+
                 if process_times:
                     recent = sorted(process_times[-20:])
                     median = recent[len(recent)//2]
                 else:
                     median = 0
 
-                # Correct median for parallel throughput
+                # [FIX] Adjust median for parallel throughput
+                # If 8 threads each take 22s, we actually finish 1 frame every 22/8 = 2.75s
                 effective_frame_time = median / max(1, INDICATOR_THREADS)
+
                 remaining_frames = total_frames - (idx_0 + 1)
                 remain_time = effective_frame_time * remaining_frames
 
+                # Print verbose status
                 print(f"[{idx_0+1:04d}/{total_frames:04d}] Fragment: {format_time(duration)} | Median: {format_time(median)} | Total: {format_time(total_elapsed)} | Remain: {format_time(remain_time)}")
+
+                # Save progress frequently
                 save_progress(progress_file, idx_0 + 2)
 
-        finally:
-            # Ensure executor is closed
-            executor.shutdown(wait=False)
-            batch_queue.clear()
+        # Clear queue after all are done
+        batch_queue.clear()
 
     # --- MAIN LOOP ---
     for i in range(start_frame - 1, total_frames):
@@ -686,13 +350,13 @@ def process_video(video_path):
 
         # GPU / CPU Fallback Logic
         try:
-            res = subprocess.run(cmd_upscayl, capture_output=True, text=True, timeout=300)
+            res = subprocess.run(cmd_upscayl, capture_output=True, encoding="utf-8", text=True, timeout=300)
             if res.returncode != 0: # Retry CPU
                  cmd_cpu = cmd_upscayl.copy(); cmd_cpu[-1] = "-1"
-                 res = subprocess.run(cmd_cpu, capture_output=True, text=True, timeout=600)
+                 res = subprocess.run(cmd_cpu, capture_output=True, encoding="utf-8", text=True, timeout=600)
         except subprocess.TimeoutExpired: # Retry CPU
              cmd_cpu = cmd_upscayl.copy(); cmd_cpu[-1] = "-1"
-             try: res = subprocess.run(cmd_cpu, capture_output=True, text=True, timeout=600)
+             try: res = subprocess.run(cmd_cpu, capture_output=True, encoding="utf-8", text=True, timeout=600)
              except: pass
 
         if not output_frame.exists():
@@ -859,7 +523,15 @@ def main():
                     continue
                 print(f"🔎 Found water-remove file: {w.name}")
                 try:
-                    ok = process_water_file(w)
+                    # Pass the configuration globals to the separated function
+                    ok = process_water_file(
+                        w,
+                        INPUT_DIR,
+                        RESULTS_WATER_DIR,
+                        SORA_VENV_ACTIVATE,
+                        SORA_CLI_DIR,
+                        SORA_CLI
+                    )
                     if ok:
                         processed_waters.add(water_id)
                         print(f"✓ Watermark removal successful for: {w.name}")
