@@ -19,8 +19,6 @@ except ImportError:
     print("❌ ERROR: sora_cleaner.py not found. Please create it next to this script.")
     sys.exit(1)
 
-# ================= CONFIGURATION =================
-# ... existing config ...
 # [NEW] Number of threads for indicator processing (default: all cores)
 INDICATOR_THREADS = os.cpu_count() or 4
 
@@ -29,6 +27,15 @@ try:
     from indicator import add_video_frame_indicator_png
 except ImportError:
     print("❌ ERROR: indicator.py not found. Please create it next to this script.")
+    sys.exit(1)
+
+import concurrent.futures  # [NEW] For parallel processing
+
+# [NEW] Import the black frame checker
+try:
+    from black_check import is_black_anomaly
+except ImportError:
+    print("❌ ERROR: black_check.py not found. Please create it next to this script.")
     sys.exit(1)
 
 # ================= CONFIGURATION =================
@@ -362,6 +369,20 @@ def process_video(video_path):
         if not output_frame.exists():
             print(f" Frame failed: {frame.name}")
             continue
+
+        # ==========================================
+        # [NEW] CHECK FOR ANOMALOUS BLACK FRAMES
+        # ==========================================
+        while is_black_anomaly(frame, output_frame):
+            print(f"⚠️ Anomaly: Upscaled output {output_frame.name} is entirely black! Pausing 1 minute...")
+            time.sleep(60)
+            print("🔄 Retrying upscayl for the black frame...")
+            try: 
+                # Re-run the standard GPU command
+                subprocess.run(cmd_upscayl, capture_output=True, encoding="utf-8", text=True, timeout=300)
+            except: 
+                pass
+        # ==========================================
 
         # Apply indicator to new frame (Single thread, since it's just one)
         tmp_annot = output_frame.with_suffix(".tmp.png")
