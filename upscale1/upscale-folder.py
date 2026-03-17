@@ -10,6 +10,9 @@ from datetime import timedelta
 import re
 import signal
 import concurrent.futures  # [NEW] For parallel processing
+from datetime import timedelta, datetime
+import json
+
 # ... existing imports ...
 
 # [NEW] Import the watermark cleaner function
@@ -31,9 +34,8 @@ except ImportError:
 
 import concurrent.futures  # [NEW] For parallel processing
 
-# [NEW] Import the black frame checker
 try:
-    from black_check import is_black_anomaly
+    from black_check import is_black_anomaly, generate_black_diagnostics
 except ImportError:
     print("❌ ERROR: black_check.py not found. Please create it next to this script.")
     sys.exit(1)
@@ -51,8 +53,20 @@ SORA_VENV_ACTIVATE = Path("/home/homdx/Project/opensource/github/sorawcleanvenv/
 SORA_CLI_DIR = Path("/home/homdx/Project/opensource/github/SoraWatermarkCleaner")
 SORA_CLI = "cli.py"
 
-# ✅ YOUR REAL PATHS
-UPSCALE_BIN = UPSCALE_ROOT / "bin" / "upscayl-bin"
+# ✅ YOUR REAL PATHS - AUTO DETECT OS
+if sys.platform == "win32":
+    # Windows
+    UPSCALE_ROOT = Path("C:/upscale20024/resources")
+    UPSCALE_BIN = UPSCALE_ROOT / "bin" / "upscayl-bin.exe"
+else:
+    # Linux (и Mac)
+    UPSCALE_ROOT = Path("/home/homdx/Progs/squashfs-root/resources")
+    UPSCALE_BIN = UPSCALE_ROOT / "bin" / "upscayl-bin"
+
+MODELS_PATH = UPSCALE_ROOT / "models"
+MODEL_MODE = "ultrasharp-4x"
+
+
 MODELS_PATH = UPSCALE_ROOT / "models"
 #MODEL_MODE = "ultrasharp-4x"
 #MODEL_MODE = "high-fidelity-4x"
@@ -70,6 +84,106 @@ num_of_video_total = 4
 # Global flag for graceful shutdown
 shutdown_flag = False
 
+def get_processor_name():
+
+    import platform
+    import subprocess
+    import time
+    import shutil
+    system = platform.system()
+    
+    if system == "Windows":
+        try:
+            return subprocess.check_output(["wmic", "cpu", "get", "name"], text=True).strip().split('\n')[1].strip()
+        except Exception:
+            pass
+    elif system == "Darwin": # macOS
+        try:
+            return subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"], text=True).strip()
+        except Exception:
+            pass
+    elif system == "Linux":
+        try:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if "model name" in line:
+                        return line.split(":")[1].strip()
+        except Exception:
+            pass
+    return platform.processor()
+
+# Evaluate ONCE globally
+CPU_NAME = get_processor_name()
+# Set flag: True only if the CPU string contains "i5" and "8600"
+DO_BLACK_BOX_CHECK = ("i5" in CPU_NAME and "8600" in CPU_NAME)
+
+print(f"Detected CPU: {CPU_NAME}")
+print(f"Black box check enabled: {DO_BLACK_BOX_CHECK}")
+
+
+
+def backup_failed_frame(project_dir, frame_idx, source_frame_path, output_frame_path, upscayl_stdout=None, upscayl_stderr=None):
+    """
+    Create a timestamped debug folder for this failed frame and copy useful artifacts there.
+    Returns path to debug folder (Path).
+    """
+    project_dir = Path(project_dir)
+    debug_root = project_dir / "failed_debug"
+    debug_root.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    folder_name = f"frame_{frame_idx:04d}_{ts}"
+    debug_folder = debug_root / folder_name
+    debug_folder.mkdir(parents=True, exist_ok=True)
+
+    # Copy source and output (if present)
+    try:
+        if source_frame_path.exists():
+            shutil.copy2(str(source_frame_path), str(debug_folder / f"source_{source_frame_path.name}"))
+        if output_frame_path.exists():
+            shutil.copy2(str(output_frame_path), str(debug_folder / f"output_{output_frame_path.name}"))
+    except Exception as e:
+        print(f"⚠️ Error copying images to debug folder: {e}")
+
+    # Save subprocess stdout/stderr if provided
+    meta = {
+        "frame_index": int(frame_idx),
+        "time_utc": ts,
+        "source": str(source_frame_path),
+        "output": str(output_frame_path)
+    }
+
+    if upscayl_stdout is not None:
+        meta["upscayl_stdout"] = str(upscayl_stdout)[:10000]
+    if upscayl_stderr is not None:
+        meta["upscayl_stderr"] = str(upscayl_stderr)[:10000]
+
+    # Save metadata json
+    try:
+        with open(debug_folder / "meta.json", "w") as mf:
+            json.dump(meta, mf, indent=2)
+    except Exception as e:
+        print(f"⚠️ Error writing meta.json: {e}")
+
+    # Run diagnostics (mask + overlay + json) from black_check
+    try:
+        # Pass the source frame, output frame, and the folder where it should save
+        diag = generate_black_diagnostics(source_frame_path, output_frame_path, debug_folder)
+
+        # merge diag into meta file for convenience
+        try:
+            meta.update({"diagnostics": diag})
+            with open(debug_folder / "meta.json", "w") as mf:
+                json.dump(meta, mf, indent=2)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"⚠️ Error generating diagnostics: {e}")
+
+    # (DO NOT use .unlink() here. Leave the original file alone!)
+    
+    print(f"🗂️  Backed up failed frame to: {debug_folder}")
+    return debug_folder
 
 def signal_handler(sig, frame):
     global shutdown_flag
@@ -346,44 +460,99 @@ def process_video(video_path):
         if batch_queue:
             flush_batch()
 
-        # --- Standard GPU Upscaling (Sequential) ---
+# --- Standard GPU Upscaling (Sequential) ---
         cmd_upscayl = [
             str(UPSCALE_BIN), "-i", str(frame), "-o", str(output_frame),
             "-m", str(MODELS_PATH), "-n", MODEL_MODE, "-f", "png",
             "-s", SCALE_FACTOR, "-c", "100", "-g", GPU_ID
         ]
 
+
+
+#########
         frame_start = time.time()
+        max_retries = 2
+        retry_count = 0
+        
+        # Default to False. We only set it to True if we ACTUALLY detect a black box.
+        is_anomaly = False 
+        upscayl_failed = False
 
-        # GPU / CPU Fallback Logic
-        try:
-            res = subprocess.run(cmd_upscayl, capture_output=True, encoding="utf-8", text=True, timeout=300)
-            if res.returncode != 0: # Retry CPU
-                 cmd_cpu = cmd_upscayl.copy(); cmd_cpu[-1] = "-1"
-                 res = subprocess.run(cmd_cpu, capture_output=True, encoding="utf-8", text=True, timeout=600)
-        except subprocess.TimeoutExpired: # Retry CPU
-             cmd_cpu = cmd_upscayl.copy(); cmd_cpu[-1] = "-1"
-             try: res = subprocess.run(cmd_cpu, capture_output=True, encoding="utf-8", text=True, timeout=600)
-             except: pass
+        while retry_count < max_retries:
+            if shutdown_flag: break
+            is_anomaly = False # Reset on each retry
+            upscayl_failed = False
 
-        if not output_frame.exists():
-            print(f" Frame failed: {frame.name}")
+            try:
+                # 1. Run the upscaler (Standard GPU call)
+                res = subprocess.run(cmd_upscayl, capture_output=True, encoding="utf-8", text=True, timeout=300)
+                
+                # 2. Fallback to CPU if GPU returns error code
+                if res.returncode != 0:
+                    cmd_cpu = cmd_upscayl.copy(); cmd_cpu[-1] = "-1"
+                    res = subprocess.run(cmd_cpu, capture_output=True, encoding="utf-8", text=True, timeout=600)
+
+                # 3. Check for the Black Box anomaly ONLY if on Intel i5 8600
+                if DO_BLACK_BOX_CHECK:
+                    detected, boxes = is_black_anomaly(frame, output_frame, min_size=(50, 50))
+                    if detected:
+                        is_anomaly = True
+                
+                # If no anomaly AND Upscayl succeeded, we are good!
+                if not is_anomaly:
+                    break # SUCCESS: Exit the retry loop
+                
+                # 4. If we are here, a black box anomaly was found
+                retry_count += 1
+                if retry_count < max_retries:
+                    print(f"⚠️ Anomaly in {output_frame.name}. Pausing 20 sec before retry {retry_count}/{max_retries}...")
+                    for _ in range(20):
+                        if shutdown_flag: break
+                        time.sleep(1)
+                
+            except Exception as e:
+                print(f"⚠️ Upscayl error: {e}")
+                upscayl_failed = True
+                retry_count += 1
+
+        # 5. Final check: If still broken after all retries, skip it
+        if (is_anomaly or upscayl_failed) and not shutdown_flag:
+            reason = "FAILED_ANOMALY" if is_anomaly else "FAILED_UPSCAYL_ERROR"
+            log_msg = f"{reason}: {output_frame.name} in project {video_name}"
+            print(f"❌ {log_msg}. Backing up artifacts for debugging and skipping to next frame.")
+            # Append a concise log line
+            with open(OUTPUT_BASE_DIR / "failed_frames.txt", "a") as f:
+                f.write(f"{log_msg}\n")
+
+            debug_folder = None
+
+            # Backup source + output + diagnostics (only for this failed frame)
+            try:
+                # source frame path is 'frame' (original in frames_dir) and output_frame is the upscaled
+                debug_folder = backup_failed_frame(project_dir, i + 1, frame, output_frame)
+            except Exception as e:
+                print(f"⚠️ Could not backup failed frame artifacts: {e}")
+
+            # Keep original output in place; optionally create an extra debug copy
+            try:
+                if debug_folder is not None and output_frame.exists():
+                    target = debug_folder / f"copied_{output_frame.name}"
+                    shutil.copy2(str(output_frame), str(target))
+            except Exception as e:
+                print(f"⚠️ Error copying broken output frame: {e}")
+
             continue
 
-        # ==========================================
-        # [NEW] CHECK FOR ANOMALOUS BLACK FRAMES
-        # ==========================================
-        while is_black_anomaly(frame, output_frame):
-            print(f"⚠️ Anomaly: Upscaled output {output_frame.name} is entirely black! Pausing 1 minute...")
-            time.sleep(60)
-            print("🔄 Retrying upscayl for the black frame...")
-            try: 
-                # Re-run the standard GPU command
-                subprocess.run(cmd_upscayl, capture_output=True, encoding="utf-8", text=True, timeout=300)
-            except: 
-                pass
-        # ==========================================
+        if shutdown_flag:
+            return False  # Exit function if user requested shutdown
 
+        # --- Proceed to Indicators and Stats ---
+        # (This part only runs if the frame is GOOD)
+        tmp_annot = output_frame.with_suffix(".tmp.png")
+        add_video_frame_indicator_png(output_frame, tmp_annot, (i+1), total_frames, num_of_video, num_of_video_total)
+        if tmp_annot.exists(): shutil.move(str(tmp_annot), str(output_frame))
+
+        # Update Stats...
         # Apply indicator to new frame (Single thread, since it's just one)
         tmp_annot = output_frame.with_suffix(".tmp.png")
         add_video_frame_indicator_png(output_frame, tmp_annot, (i+1), total_frames, num_of_video, num_of_video_total)
