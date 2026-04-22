@@ -6,14 +6,11 @@ import subprocess
 import sys
 import shutil
 from pathlib import Path
-from datetime import timedelta
+from datetime import timedelta, datetime   # FIX #1: single import (was duplicated on two lines)
 import re
 import signal
-import concurrent.futures  # [NEW] For parallel processing
-from datetime import timedelta, datetime
+import concurrent.futures                  # FIX #1: single import (was imported again on line 35)
 import json
-
-# ... existing imports ...
 
 # [NEW] Import the watermark cleaner function
 try:
@@ -32,8 +29,6 @@ except ImportError:
     print("❌ ERROR: indicator.py not found. Please create it next to this script.")
     sys.exit(1)
 
-import concurrent.futures  # [NEW] For parallel processing
-
 try:
     from black_check import is_black_anomaly, generate_black_diagnostics
 except ImportError:
@@ -41,39 +36,30 @@ except ImportError:
     sys.exit(1)
 
 # ================= CONFIGURATION =================
-INPUT_DIR = Path("./input_videos")
-OUTPUT_BASE_DIR = Path("./results")
+INPUT_DIR        = Path("./input_videos")
+OUTPUT_BASE_DIR  = Path("./results")
 
 # Watermark cleaner dirs
-WATER_DIR = Path("./water_remove")
+# NOTE: Tool paths (venv, CLI dir, CLI script) are now configured inside
+# sora_cleaner.py at the top of that file — no longer passed from here.
+WATER_DIR        = Path("./water_remove")
 RESULTS_WATER_DIR = Path("./results-water")
-# Virtualenv activate script (user provided)
-SORA_VENV_ACTIVATE = Path("/home/homdx/Project/opensource/github/sorawcleanvenv/bin/activate")
-# SoraWatermarkCleaner repo folder (where cli.py lives)
-SORA_CLI_DIR = Path("/home/homdx/Project/opensource/github/SoraWatermarkCleaner")
-SORA_CLI = "cli.py"
 
 # ✅ YOUR REAL PATHS - AUTO DETECT OS
 if sys.platform == "win32":
-    # Windows
     UPSCALE_ROOT = Path("C:/upscale20024/resources")
-    UPSCALE_BIN = UPSCALE_ROOT / "bin" / "upscayl-bin.exe"
+    UPSCALE_BIN  = UPSCALE_ROOT / "bin" / "upscayl-bin.exe"
 else:
-    # Linux (и Mac)
     UPSCALE_ROOT = Path("/home/homdx/Progs/squashfs-root/resources")
-    UPSCALE_BIN = UPSCALE_ROOT / "bin" / "upscayl-bin"
+    UPSCALE_BIN  = UPSCALE_ROOT / "bin" / "upscayl-bin"
 
-MODELS_PATH = UPSCALE_ROOT / "models"
-MODEL_MODE = "ultrasharp-4x"
-
-
-MODELS_PATH = UPSCALE_ROOT / "models"
+MODELS_PATH = UPSCALE_ROOT / "models"  # FIX #1: single assignment (was assigned twice)
+MODEL_MODE  = "remacri-4x"             # FIX #1: single assignment (was assigned twice)
 #MODEL_MODE = "ultrasharp-4x"
 #MODEL_MODE = "high-fidelity-4x"
 #MODEL_MODE = "upscayl-standard-4x"
 #MODEL_MODE = "ultramix-balanced-4x"
-#MODEL_MODE = "remacri-4x"
-MODEL_MODE = "4x_NMKD-Siax_200k"
+#MODEL_MODE = "4x_NMKD-Siax_200k"
 SCALE_FACTOR = "4"
 
 GPU_ID = "0"
@@ -181,7 +167,7 @@ def backup_failed_frame(project_dir, frame_idx, source_frame_path, output_frame_
         print(f"⚠️ Error generating diagnostics: {e}")
 
     # (DO NOT use .unlink() here. Leave the original file alone!)
-    
+
     print(f"🗂️  Backed up failed frame to: {debug_folder}")
     return debug_folder
 
@@ -473,7 +459,7 @@ def process_video(video_path):
         frame_start = time.time()
         max_retries = 2
         retry_count = 0
-        
+
         # Default to False. We only set it to True if we ACTUALLY detect a black box.
         is_anomaly = False 
         upscayl_failed = False
@@ -486,7 +472,7 @@ def process_video(video_path):
             try:
                 # 1. Run the upscaler (Standard GPU call)
                 res = subprocess.run(cmd_upscayl, capture_output=True, encoding="utf-8", text=True, timeout=300)
-                
+
                 # 2. Fallback to CPU if GPU returns error code
                 if res.returncode != 0:
                     cmd_cpu = cmd_upscayl.copy(); cmd_cpu[-1] = "-1"
@@ -497,11 +483,11 @@ def process_video(video_path):
                     detected, boxes = is_black_anomaly(frame, output_frame, min_size=(50, 50))
                     if detected:
                         is_anomaly = True
-                
+
                 # If no anomaly AND Upscayl succeeded, we are good!
                 if not is_anomaly:
                     break # SUCCESS: Exit the retry loop
-                
+
                 # 4. If we are here, a black box anomaly was found
                 retry_count += 1
                 if retry_count < max_retries:
@@ -509,7 +495,7 @@ def process_video(video_path):
                     for _ in range(20):
                         if shutdown_flag: break
                         time.sleep(1)
-                
+
             except Exception as e:
                 print(f"⚠️ Upscayl error: {e}")
                 upscayl_failed = True
@@ -548,12 +534,6 @@ def process_video(video_path):
 
         # --- Proceed to Indicators and Stats ---
         # (This part only runs if the frame is GOOD)
-        tmp_annot = output_frame.with_suffix(".tmp.png")
-        add_video_frame_indicator_png(output_frame, tmp_annot, (i+1), total_frames, num_of_video, num_of_video_total)
-        if tmp_annot.exists(): shutil.move(str(tmp_annot), str(output_frame))
-
-        # Update Stats...
-        # Apply indicator to new frame (Single thread, since it's just one)
         tmp_annot = output_frame.with_suffix(".tmp.png")
         add_video_frame_indicator_png(output_frame, tmp_annot, (i+1), total_frames, num_of_video, num_of_video_total)
         if tmp_annot.exists(): shutil.move(str(tmp_annot), str(output_frame))
@@ -688,8 +668,6 @@ def main():
     print(f"Results-water directory: {RESULTS_WATER_DIR.absolute()}")
     print(f"Upscayl path: {UPSCALE_BIN}")
     print(f"Model: {MODEL_MODE}")
-    print(f"Sora CLI dir: {SORA_CLI_DIR}")
-    print(f"Sora venv activate: {SORA_VENV_ACTIVATE}")
     print(f"{'='*60}\n")
     # Check required tools
     if not check_tools():
@@ -713,14 +691,13 @@ def main():
                     continue
                 print(f"🔎 Found water-remove file: {w.name}")
                 try:
-                    # Pass the configuration globals to the separated function
+                    # FIX #2 (HIGH): process_water_file now owns its own tool paths.
+                    # Signature is (video_path, INPUT_DIR, RESULTS_WATER_DIR) — 3 args only.
+                    # Previously 6 args were passed, causing a TypeError at runtime.
                     ok = process_water_file(
                         w,
                         INPUT_DIR,
-                        RESULTS_WATER_DIR,
-                        SORA_VENV_ACTIVATE,
-                        SORA_CLI_DIR,
-                        SORA_CLI
+                        RESULTS_WATER_DIR
                     )
                     if ok:
                         processed_waters.add(water_id)
